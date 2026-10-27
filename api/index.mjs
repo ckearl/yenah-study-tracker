@@ -368,10 +368,12 @@ async function countAttempt(key, now) {
 
 async function login(body, ip) {
   const now = Date.now();
-  const [mine, all] = await Promise.all([countAttempt(`ip:${ip}`, now), countAttempt('all', now)]);
-  if (mine.fails > MAX_FAILS || all.fails > MAX_FAILS_ALL) {
-    return json(429, { error: `Too many tries. Try again in ${Math.ceil(mine.retryMs / 60e3)} min.` });
-  }
+  const tooMany = ({ retryMs }) => json(429, { error: `Too many tries. Try again in ${Math.ceil(retryMs / 60e3)} min.` });
+  const mine = await countAttempt(`ip:${ip}`, now);
+  if (mine.fails > MAX_FAILS) return tooMany(mine);
+  // Only attempts within an IP's own limit count toward the backstop, so one IP can't trip it alone.
+  const all = await countAttempt('all', now);
+  if (all.fails > MAX_FAILS_ALL) return tooMany(all);
   if (!checkPassword(body.password)) return json(401, { error: 'Wrong password' });
   await del('LOCK', mine.sk); // her typos before a successful sign-in don't count against her later
   const token = randomBytes(32).toString('base64url');
