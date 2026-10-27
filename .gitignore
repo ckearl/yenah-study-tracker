@@ -1,0 +1,6 @@
+node_modules/
+.DS_Store
+# Deploy secrets (passcode, VAPID private key) live only on the deploying machine.
+infra/.secrets.env
+build/
+*.swp
