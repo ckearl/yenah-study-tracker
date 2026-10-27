@@ -8,7 +8,7 @@ A clock-in/clock-out tracker for law school study time, built for a phone: <http
   - **Fallback:** until the calendar has been read once (or with no `CALENDAR_URL`), the semester schedule in Settings is used, skipping holidays from the school's academic calendar.
 - **Everything is editable in the app:** classes, semesters, class times, holidays, "Other" activity options, and color schemes (3 presets plus unlimited custom ones, each with light and dark versions).
 - **Reminder:** one push notification if a timer runs without a pause for 2.5 hours (adjustable from 30 min to 8 hours, or turned off, in Settings → Reminders).
-- **Sign-in:** a password, remembered for 30 days on each device. Signed-in devices are listed in Settings.
+- **Sign-in:** a password, remembered for 30 days on each device. Signed-in devices are listed in Settings. After 8 wrong tries from one IP address, that address waits 15 minutes (100 wrong tries from anywhere pauses all new sign-ins for up to 15 minutes; signed-in devices are unaffected).
 
 ## Layout
 
@@ -21,7 +21,7 @@ A clock-in/clock-out tracker for law school study time, built for a phone: <http
 
 ## AWS (us-west-2, all free tier)
 
-- DynamoDB table `yenstudy` (provisioned 5/5, single-table: `S` sessions, `META` config/active timer, `TOKEN` logins, `SUB` push subscriptions)
+- DynamoDB table `yenstudy` (provisioned 5/5, single-table: `S` sessions, `META` config/active timer, `TOKEN` logins, `LOCK` sign-in attempt counts, `SUB` push subscriptions)
 - Lambda `yenstudy-api` (Node 22, arm64) behind a Function URL
 - S3 `yenstudy-ckearl-web` → CloudFront (`/api/*` routed to the Lambda) → Route53 `yenstudy.ckearl.com`
 - EventBridge rule `yenstudy-reminders`: invokes the Lambda every 5 min to check for a stopwatch past 2.5 h (no notification unless one is)

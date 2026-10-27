@@ -13,7 +13,8 @@ const TABLE = process.env.TABLE;
 const PASSWORD_HASH = process.env.PASSWORD_HASH; // "scrypt$<salt hex>$<hash hex>"
 const CALENDAR_URL = process.env.CALENDAR_URL; // her Google "class" calendar's secret iCal address
 const TOKEN_DAYS = 30;
-const MAX_FAILS = 8;
+const MAX_FAILS = 8; // sign-in attempts per IP per window
+const MAX_FAILS_ALL = 100; // across all IPs, a backstop against spread-out guessing
 const LOCK_MS = 15 * 60e3;
 const MAX_BODY = 100_000;
 const MAX_SUBS = 10;
@@ -342,16 +343,37 @@ function checkPassword(pw) {
 }
 const tokenId = (token) => createHash('sha256').update(token).digest('hex');
 
-async function login(body) {
-  const lock = (await get('META', 'lock')) || { fails: 0 };
+// The viewer's IP. CloudFront appends it to X-Forwarded-For (after anything the client sent), and the
+// Function URL may append CloudFront's own address, which is requestContext.http.sourceIp.
+function clientIp(event) {
+  const src = event.requestContext?.http?.sourceIp || 'unknown';
+  const hops = String(event.headers?.['x-forwarded-for'] || '').split(',').map((x) => x.trim()).filter(Boolean);
+  while (hops.length && hops.at(-1) === src) hops.pop();
+  return hops.at(-1) || src;
+}
+
+// Count an attempt atomically before checking the password, so parallel requests can't
+// slip extra guesses past the limit. Fixed 15-minute windows; items expire by TTL.
+async function countAttempt(key, now) {
+  const window = Math.floor(now / LOCK_MS);
+  const r = await db.send(new UpdateCommand({
+    TableName: TABLE, Key: { pk: 'LOCK', sk: `${key}#${window}` },
+    UpdateExpression: 'ADD fails :one SET #ttl = :ttl',
+    ExpressionAttributeNames: { '#ttl': 'ttl' },
+    ExpressionAttributeValues: { ':one': 1, ':ttl': Math.floor(((window + 1) * LOCK_MS) / 1000) + 3600 },
+    ReturnValues: 'UPDATED_NEW',
+  }));
+  return { fails: r.Attributes.fails, sk: `${key}#${window}`, retryMs: (window + 1) * LOCK_MS - now };
+}
+
+async function login(body, ip) {
   const now = Date.now();
-  if (lock.until > now) return json(429, { error: `Too many tries. Try again in ${Math.ceil((lock.until - now) / 60e3)} min.` });
-  if (!checkPassword(body.password)) {
-    const fails = (lock.fails || 0) + 1;
-    await put(fails >= MAX_FAILS ? { pk: 'META', sk: 'lock', fails: 0, until: now + LOCK_MS } : { pk: 'META', sk: 'lock', fails });
-    return json(401, { error: 'Wrong password' });
+  const [mine, all] = await Promise.all([countAttempt(`ip:${ip}`, now), countAttempt('all', now)]);
+  if (mine.fails > MAX_FAILS || all.fails > MAX_FAILS_ALL) {
+    return json(429, { error: `Too many tries. Try again in ${Math.ceil(mine.retryMs / 60e3)} min.` });
   }
-  if (lock.fails) await del('META', 'lock');
+  if (!checkPassword(body.password)) return json(401, { error: 'Wrong password' });
+  await del('LOCK', mine.sk); // her typos before a successful sign-in don't count against her later
   const token = randomBytes(32).toString('base64url');
   const expires = now + TOKEN_DAYS * 86400e3;
   await put({
@@ -465,7 +487,7 @@ export async function handler(event) {
     let body = {};
     if (event.body) body = JSON.parse(event.isBase64Encoded ? Buffer.from(event.body, 'base64').toString() : event.body);
     if (body === null || typeof body !== 'object') return json(400, { error: 'bad body' });
-    if (method === 'POST' && path === '/api/login') return await login(body);
+    if (method === 'POST' && path === '/api/login') return await login(body, clientIp(event));
     const me = await authenticate(event.headers);
     if (!me) return json(401, { error: 'Please sign in' });
     return await route(method, path, body, me);

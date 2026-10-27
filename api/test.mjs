@@ -15,7 +15,13 @@ DynamoDBDocumentClient.prototype.send = async function (cmd) {
   }
   if (n === 'DeleteCommand') { store.delete(k(i.Key)); return {}; }
   if (n === 'QueryCommand') return { Items: [...store.values()].filter((x) => x.pk === i.ExpressionAttributeValues[':p']) };
-  if (n === 'UpdateCommand') { // supports the single 'SET attr = :v' form the API uses
+  if (n === 'UpdateCommand') { // supports the 'SET attr = :v' and 'ADD attr :n SET #name = :v' forms the API uses
+    const add = /^ADD (\w+) (:\w+)/.exec(i.UpdateExpression);
+    if (add) {
+      const item = store.get(k(i.Key)) || { ...i.Key };
+      item[add[1]] = (item[add[1]] || 0) + i.ExpressionAttributeValues[add[2]];
+      store.set(k(i.Key), item); return { Attributes: { [add[1]]: item[add[1]] } };
+    }
     const item = store.get(k(i.Key));
     if (!item) throw Object.assign(new Error('c'), { name: 'ConditionalCheckFailedException' });
     const [, attr, ph] = /SET (\w+) = (:\w+)/.exec(i.UpdateExpression);
@@ -199,5 +205,16 @@ tokItem.expires = Date.now() - 1;
 assert((await call('GET', '/api/state')).status === 401, 'expired token rejected');
 Date.now = realNow;
 // Lockout after repeated wrong passwords
-for (let i = 0; i < 8; i++) await call('POST', '/api/login', { password: 'bad' });
-assert((await call('POST', '/api/login', { password: 'pw' })).status === 429, 'locks out after 8 failures');
+// Lockout is per viewer IP (the last X-Forwarded-For hop before CloudFront's own address)
+const loginFrom = (xff, password) => handler({ rawPath: '/api/login', requestContext: { http: { method: 'POST', sourceIp: '130.176.1.1' } }, headers: { 'x-forwarded-for': xff }, body: JSON.stringify({ password }) }).then((r) => r.statusCode);
+assert((await Promise.all(Array.from({ length: 12 }, () => loginFrom('9.9.9.9', 'bad')))).filter((c) => c === 401).length === 8, 'parallel attempts: only 8 checked');
+assert(await loginFrom('9.9.9.9, 130.176.1.1', 'pw') === 429, 'locks out after 8 failures');
+assert(await loginFrom('1.2.3.4, 9.9.9.9', 'pw') === 429, 'spoofed X-Forwarded-For prefix does not escape the lock');
+assert(await loginFrom('5.6.7.8', 'pw') === 200, 'another IP can still sign in');
+for (let i = 0; i < 7; i++) await loginFrom('5.6.7.8', 'bad');
+assert(await loginFrom('5.6.7.8', 'pw') === 200 && await loginFrom('5.6.7.8', 'bad') === 401, 'successful sign-in resets that IP\'s count');
+Date.now = () => realNow() + 16 * 60e3;
+assert(await loginFrom('9.9.9.9', 'pw') === 200, 'lock lifts after 15 minutes');
+for (let i = 0; i < 100; i++) await loginFrom(`10.0.${i >> 8}.${i & 255}`, 'bad');
+assert(await loginFrom('7.7.7.7', 'pw') === 429, 'backstop: 100 failures across all IPs locks sign-in');
+Date.now = realNow;
